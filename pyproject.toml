@@ -11,11 +11,9 @@ transformers = "^4.31.0"
 diffusers = "^0.19.3"
 k-diffusion = "0.0.15"
 torch = "2.0.0"
-huggingface-hub = {git = "https://github.com/huggingface/huggingface_hub.git"}
-omegaconf = "^2.3.0"
 numpy = "^1.25.2"
 pytorch-lightning = "^2.0.6"
-requests = "^2.31.0"
+pillow = "^10.0.0"
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.12.0"

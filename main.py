@@ -1,23 +1,16 @@
 import os
-import sys
 import time
 
-ROOT_DIR = os.path.dirname(__file__)
-sys.path.extend([os.path.join(ROOT_DIR, 'models/taming-transformers')])
-sys.path.extend([os.path.join(ROOT_DIR, 'models/stable-diffusion')])
-
-import huggingface_hub
 import k_diffusion as K
 import numpy as np
 import torch
 import torch.nn.functional as F
-from ldm.util import instantiate_from_config
-from omegaconf import OmegaConf
+from diffusers import AutoencoderKL
 from PIL import Image
 from pytorch_lightning import seed_everything
 from torch import nn
 from torchvision.transforms import functional as TF
-from transformers import CLIPTextModel, CLIPTokenizer, logging
+from transformers import CLIPTextModel, CLIPTokenizer
 
 
 class NoiseLevelAndTextConditionedUpscaler(nn.Module):
@@ -87,7 +80,6 @@ class CFGUpscaler(nn.Module):
 
 class CLIPTokenizerTransform:
     def __init__(self, version='openai/clip-vit-large-patch14', max_length=77):
-
         self.tokenizer = CLIPTokenizer.from_pretrained(version)
         self.max_length = max_length
 
@@ -112,8 +104,6 @@ class CLIPEmbedder(nn.Module):
 
     def __init__(self, version='openai/clip-vit-large-patch14', device='cuda'):
         super().__init__()
-
-        logging.set_verbosity_error()
         self.transformer = CLIPTextModel.from_pretrained(version)
         self.transformer = (
             self.transformer.eval().requires_grad_(False).to(device)
@@ -206,6 +196,7 @@ SD_C = 4   # Latent dimension
 SD_F = 8   # Latent patch size (pixels per latent)
 SD_Q = 0.18215   # sd_model.scale_factor; scaling for latents in first stage models
 SIGMA_MIN, SIGMA_MAX = 0.029167532920837402, 14.614642143249512
+ROOT_DIR = os.path.dirname(__file__)
 cpu = torch.device('cpu')
 device = torch.device('cuda')
 
@@ -230,7 +221,7 @@ tokenizer = CLIPTokenizerTransform()
 # Text Encoder 作成
 text_encoder = CLIPEmbedder(device=device)
 
-# UpScaler Model 作成
+# UpScaler Model 作成 (Latent Diffusion Model)
 model = make_upscaler_model(
     os.path.join(ROOT_DIR, 'configs/latent_upscaler.json'),
     os.path.join(ROOT_DIR, 'models/latent_upscaler.pth'),
@@ -242,18 +233,15 @@ model = CFGUpscaler(
 )
 
 # VAE 作成
-vae_path = huggingface_hub.hf_hub_download(
-    'stabilityai/sd-vae-ft-mse-original', 'vae-ft-mse-840000-ema-pruned.ckpt'
+vae = (
+    AutoencoderKL.from_pretrained(
+        'runwayml/stable-diffusion-v1-5', subfolder='vae'
+    )
+    .to(cpu)
+    .eval()
+    .requires_grad_(False)
+    .to(device)
 )
-pl_sd = torch.load(vae_path, map_location='cpu')
-sd = pl_sd['state_dict']
-config = OmegaConf.load(
-    os.path.join(ROOT_DIR, 'configs/kl_f8.yaml')
-)
-vae = instantiate_from_config(config.model)
-m, u = vae.load_state_dict(sd, strict=False)
-vae = vae.to(cpu).eval().requires_grad_(False).to(device)
-
 
 ###
 # 実行
@@ -263,9 +251,9 @@ seed_everything(seed)
 # 画像を開きエンコード
 image = Image.open(input_image_path).convert('RGB')
 image = TF.to_tensor(image).to(device) * 2 - 1
-low_res_latent = vae.encode(image.unsqueeze(0)).sample() * SD_Q
+low_res_latent = vae.encode(image.unsqueeze(0)).latent_dist.sample() * SD_Q
 
-# ノイズ生成
+# 初期ノイズ生成
 [_, C, H, W] = low_res_latent.shape
 x_shape = [batch_size, C, 2 * H, 2 * W]
 noise = torch.randn(x_shape, device=device)
@@ -288,10 +276,10 @@ extra_args = {
 up_latents = do_sample(model, noise, extra_args)
 
 # デコード
-pixels = vae.decode(up_latents / SD_Q)
+pixels = vae.decode(up_latents / SD_Q).sample
 pixels = pixels.add(1).div(2).clamp(0, 1)
 
 # 画像の保存
-for j in range(pixels.shape[0]):
-    img = TF.to_pil_image(pixels[j])
+for i in range(pixels.shape[0]):
+    img = TF.to_pil_image(pixels[i])
     img.save(output_image_path)
