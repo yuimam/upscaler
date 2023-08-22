@@ -105,7 +105,7 @@ def upscale(
 
     download_model(UPSCALER_DIR, UPSCALER_FILENAME)
     seed_everything(int(time.time()))
-    
+
     tokenizer, text_encoder = CLIPTokenizerTransform(), CLIPEmbedder()
     upscaler = CFGUpscaler(
         make_upscaler_model(
@@ -124,7 +124,6 @@ def upscale(
         .requires_grad_(False)
         .to(DEVICE)
     )
-
 
     # Encode an image
     image = Image.open(input_path).convert('RGB')
