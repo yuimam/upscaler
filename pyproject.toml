@@ -1,8 +1,8 @@
 [tool.poetry]
 name = "upscaler"
-version = "0.1.0"
-description = ""
-authors = ["Yuta Imamura"]
+version = "1.0.0"
+description = "Task2 for the Stability.ai interview"
+authors = ["Yuta Imamura <yuimam@amazon.co.jp>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
@@ -14,6 +14,9 @@ torch = "2.0.0"
 numpy = "^1.25.2"
 pytorch-lightning = "^2.0.6"
 pillow = "^10.0.0"
+click = "^8.1.7"
+requests = "^2.31.0"
+tqdm = "^4.66.1"
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.12.0"
@@ -21,7 +24,7 @@ blue = "^0.9.1"
 taskipy = "^1.12.0"
 
 [tool.taskipy.tasks]
-format = "blue main.py && isort main.py"
+format = "blue . && isort ."
 
 [build-system]
 requires = ["poetry-core"]
