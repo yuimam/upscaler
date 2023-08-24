@@ -36,7 +36,6 @@ def get_cli():
 )
 @click.option(
     '--batch-size',
-    required=True,
     default=1,
     type=click.IntRange(1),
 )
