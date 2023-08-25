@@ -1,4 +1,6 @@
 import os
+from contextlib import contextmanager, nullcontext
+from functools import lru_cache
 
 import click
 import k_diffusion as K
@@ -7,7 +9,7 @@ import requests
 import torch
 from tqdm import tqdm
 
-from models.upscalers import NoiseLevelAndTextConditionedUpscaler
+from models.upscaler import NoiseLevelAndTextConditionedUpscaler
 
 
 def download_model(dir, filename):
@@ -37,8 +39,9 @@ def download_model(dir, filename):
         click.echo('Model download was successful')
 
 
+@lru_cache()
 def make_upscaler_model(
-    config_path, model_path, device='cuda', pooler_dim=768, train=False
+    config_path, model_path, device, pooler_dim=768, train=False
 ):
     config = K.config.load_config(open(config_path))
     model = K.config.make_model(config)
@@ -56,7 +59,7 @@ def make_upscaler_model(
 
 
 def do_sample(
-    model, noise, sampler, steps, eta, tol_scale, extra_args, device='cuda'
+    model, noise, sampler, steps, eta, tol_scale, extra_args, device
 ):
     SIGMA_MIN, SIGMA_MAX = 0.029167532920837402, 14.614642143249512
     sigmas = (
@@ -104,3 +107,23 @@ def do_sample(
             eta=eta,
             **sampler_opts,
         )
+
+
+@lru_cache()
+def get_available_device():
+    if torch.backends.mps.is_available():
+        return 'mps'
+    elif torch.cuda.is_available():
+        return 'cuda'
+    return 'cpu'
+
+
+@contextmanager
+def amp_autocast(use_autocast, device):
+    device_type = device.type
+    if use_autocast and device_type in ('cuda',):
+        precision_scope = torch.autocast
+    else:
+        precision_scope = nullcontext
+    with precision_scope(device_type):
+        yield
