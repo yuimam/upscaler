@@ -50,23 +50,45 @@ class ImageController:
             click.echo('Upscaler model already downloaded')
             return
 
-        with requests.get(self.UPSCALER_URL, stream=True) as r:
-            click.echo('Upscaler model download has started')
-            total_size = int(r.headers.get('content-length', 0))
-            with open(filepath, 'wb') as f:
-                tqdm_params = {
-                    'desc': self.UPSCALER_URL,
-                    'total': total_size,
-                    'miniters': 1,
-                    'unit': 'B',
-                    'unit_scale': True,
-                    'unit_divisor': 1024,
-                }
-                with tqdm(**tqdm_params) as progress:
-                    for chunk in r.iter_content(chunk_size=1024 * 1024):
-                        f.write(chunk)
-                        progress.update(len(chunk))
-            click.echo('Upscaler model download was successful')
+        RETRY_LIMIT = 3
+        RETRY_DELAY = 5
+        attempts = 0
+        click.echo('Upscaler model download has started')
+        while attempts < RETRY_LIMIT:
+            try:
+                with requests.get(self.UPSCALER_URL, stream=True) as r:
+                    r.raise_for_status()
+                    total_size = int(r.headers.get('content-length', 0))
+                    with open(filepath, 'wb') as f:
+                        tqdm_params = {
+                            'desc': self.UPSCALER_URL,
+                            'total': total_size,
+                            'miniters': 1,
+                            'unit': 'B',
+                            'unit_scale': True,
+                            'unit_divisor': 1024,
+                        }
+                        with tqdm(**tqdm_params) as progress:
+                            for chunk in r.iter_content(
+                                chunk_size=1024 * 1024
+                            ):
+                                f.write(chunk)
+                                progress.update(len(chunk))
+                    click.echo('Upscaler model download was successful')
+                    return
+
+            except Exception as e:
+                click.echo(f'Download failed: {e}')
+                attempts += 1
+                if attempts < RETRY_LIMIT:
+                    click.echo(f'Retrying in {RETRY_DELAY} seconds...')
+                    time.sleep(RETRY_DELAY)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+
+        click.echo(
+            'Download failed after multiple attempts. Please check your connection and try again later.'
+        )
 
     @lru_cache()
     def _make_upscaler_model(
