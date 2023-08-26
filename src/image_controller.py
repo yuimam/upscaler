@@ -1,17 +1,21 @@
 import os
 import time
 import uuid
+from functools import lru_cache
 
 import click
+import k_diffusion as K
+import numpy as np
+import requests
 import torch
 from diffusers import StableDiffusionPipeline
 from pytorch_lightning import seed_everything
 from torchvision.transforms import functional as TF
+from tqdm import tqdm
 
 from models.clip import CLIPEmbedder, CLIPTokenizerTransform
-from models.upscaler import CFGUpscaler
+from models.upscaler import CFGUpscaler, NoiseLevelAndTextConditionedUpscaler
 from src import ROOT_DIR
-from utils import do_sample, download_model, make_upscaler_model
 
 
 class ImageController:
@@ -29,6 +33,7 @@ class ImageController:
     UPSCALER_DIR = os.path.join(ROOT_DIR, 'latent_upscaler')
     UPSCALER_FILENAME = 'latent_upscaler.pth'
     UPSCALER_CONFIG = 'latent_upscaler.json'
+    UPSCALER_URL = 'https://models.rivershavewings.workers.dev/laion_text_cond_latent_upscaler_2_1_00470000_slim.pth'
     SCALE_FACTOR = 0.18215
     OUTPUT_DIR = os.path.join(ROOT_DIR, 'output')
 
@@ -38,6 +43,106 @@ class ImageController:
             'runwayml/stable-diffusion-v1-5'
         ).to(self.device)
         seed_everything(int(time.time()))
+
+    def _download_upscaler_model(self, dir, filename):
+        filepath = os.path.join(dir, filename)
+        if os.path.exists(filepath):
+            click.echo('Upscaler model already downloaded')
+            return
+
+        with requests.get(self.UPSCALER_URL, stream=True) as r:
+            click.echo('Upscaler model download has started')
+            total_size = int(r.headers.get('content-length', 0))
+            with open(filepath, 'wb') as f:
+                tqdm_params = {
+                    'desc': self.UPSCALER_URL,
+                    'total': total_size,
+                    'miniters': 1,
+                    'unit': 'B',
+                    'unit_scale': True,
+                    'unit_divisor': 1024,
+                }
+                with tqdm(**tqdm_params) as progress:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        progress.update(len(chunk))
+            click.echo('Upscaler model download was successful')
+
+    @lru_cache()
+    def _make_upscaler_model(
+        self, config_path, model_path, device, pooler_dim=768, train=False
+    ):
+        config = K.config.load_config(open(config_path))
+        model = K.config.make_model(config)
+        model = NoiseLevelAndTextConditionedUpscaler(
+            model,
+            sigma_data=config['model']['sigma_data'],
+            embed_dim=config['model']['mapping_cond_dim'] - pooler_dim,
+        )
+        ckpt = torch.load(model_path, map_location='cpu')
+        model.load_state_dict(ckpt['model_ema'])
+        model = K.config.make_denoiser_wrapper(config)(model)
+        if not train:
+            model = model.eval().requires_grad_(False)
+        return model.to(device)
+
+    def _do_sample(
+        self, model, noise, sampler, steps, eta, tol_scale, extra_args, device
+    ):
+        SIGMA_MIN, SIGMA_MAX = 0.029167532920837402, 14.614642143249512
+        sigmas = (
+            torch.linspace(np.log(SIGMA_MAX), np.log(SIGMA_MIN), steps + 1)
+            .exp()
+            .to(device)
+        )
+        if sampler == 'k_euler':
+            return K.sampling.sample_euler(
+                model, noise * SIGMA_MAX, sigmas, extra_args=extra_args
+            )
+        elif sampler == 'k_euler_ancestral':
+            return K.sampling.sample_euler_ancestral(
+                model,
+                noise * SIGMA_MAX,
+                sigmas,
+                extra_args=extra_args,
+                eta=eta,
+            )
+        elif sampler == 'k_dpm_2_ancestral':
+            return K.sampling.sample_dpm_2_ancestral(
+                model,
+                noise * SIGMA_MAX,
+                sigmas,
+                extra_args=extra_args,
+                eta=eta,
+            )
+        elif sampler == 'k_dpm_fast':
+            return K.sampling.sample_dpm_fast(
+                model,
+                noise * SIGMA_MAX,
+                SIGMA_MIN,
+                SIGMA_MAX,
+                steps,
+                extra_args=extra_args,
+                eta=eta,
+            )
+        else:
+            sampler_opts = dict(
+                s_noise=1.0,
+                rtol=tol_scale * 0.05,
+                atol=tol_scale / 127.5,
+                pcoeff=0.2,
+                icoeff=0.4,
+                dcoeff=0,
+            )
+            return K.sampling.sample_dpm_adaptive(
+                model,
+                noise * SIGMA_MAX,
+                SIGMA_MIN,
+                SIGMA_MAX,
+                extra_args=extra_args,
+                eta=eta,
+                **sampler_opts,
+            )
 
     def generate_latents(
         self,
@@ -80,9 +185,11 @@ class ImageController:
         encoded_c = text_encoder(tokenizer([prompt]))
         encoded_uc = text_encoder(tokenizer([negative_prompt]))
 
-        download_model(self.UPSCALER_DIR, self.UPSCALER_FILENAME)
+        self._download_upscaler_model(
+            self.UPSCALER_DIR, self.UPSCALER_FILENAME
+        )
         upscaler = CFGUpscaler(
-            make_upscaler_model(
+            self._make_upscaler_model(
                 os.path.join(self.UPSCALER_DIR, self.UPSCALER_CONFIG),
                 os.path.join(self.UPSCALER_DIR, self.UPSCALER_FILENAME),
                 self.device,
@@ -113,7 +220,7 @@ class ImageController:
             [_, C, H, W] = low_res_latent.shape
             x_shape = [1, C, 2 * H, 2 * W]
             noise = torch.randn(x_shape, device=self.device)
-            up_latent = do_sample(
+            up_latent = self._do_sample(
                 upscaler,
                 noise,
                 sampler,
