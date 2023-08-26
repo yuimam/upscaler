@@ -1,12 +1,10 @@
 from torch import nn
 from transformers import CLIPTextModel, CLIPTokenizer
 
-VERSION = 'openai/clip-vit-large-patch14'
-
 
 class CLIPTokenizerTransform:
-    def __init__(self, version=VERSION, max_length=77):
-        self.tokenizer = CLIPTokenizer.from_pretrained(version)
+    def __init__(self, tokenizer, max_length=77):
+        self.tokenizer = tokenizer
         self.max_length = max_length
 
     def __call__(self, text):
@@ -25,9 +23,9 @@ class CLIPTokenizerTransform:
 
 
 class CLIPEmbedder(nn.Module):
-    def __init__(self, device, version=VERSION):
+    def __init__(self, encoder, device):
         super().__init__()
-        self.transformer = CLIPTextModel.from_pretrained(version)
+        self.transformer = encoder
         self.transformer = (
             self.transformer.eval().requires_grad_(False).to(device)
         )

@@ -17,11 +17,11 @@ def download_model(dir, filename):
 
     filepath = os.path.join(dir, filename)
     if os.path.exists(filepath):
-        click.echo('Model already downloaded')
+        click.echo('Upscaler model already downloaded')
         return
 
     with requests.get(URL, stream=True) as r:
-        click.echo('Model download has started')
+        click.echo('Upscaler model download has started')
         total_size = int(r.headers.get('content-length', 0))
         with open(filepath, 'wb') as f:
             tqdm_params = {
@@ -36,7 +36,7 @@ def download_model(dir, filename):
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
                     f.write(chunk)
                     progress.update(len(chunk))
-        click.echo('Model download was successful')
+        click.echo('Upscaler model download was successful')
 
 
 @lru_cache()

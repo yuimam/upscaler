@@ -1,10 +1,10 @@
 import os
 import time
+import uuid
 
 import click
 import torch
-from diffusers import AutoencoderKL, StableDiffusionPipeline
-from PIL import Image
+from diffusers import StableDiffusionPipeline
 from pytorch_lightning import seed_everything
 from torchvision.transforms import functional as TF
 
@@ -26,14 +26,21 @@ def get_cli():
 
 @click.command()
 @click.option(
-    '--input-path',
+    '--prompt',
     required=True,
-    type=click.Path(exists=True),
 )
 @click.option(
-    '--output-path',
+    '--negative-prompt',
+)
+@click.option(
+    '--output-dir',
     required=True,
     type=click.Path(exists=False),
+)
+@click.option(
+    '--num-images',
+    default=1,
+    type=click.IntRange(1, 10),
 )
 @click.option(
     '--batch-size',
@@ -90,8 +97,10 @@ def get_cli():
 )
 @torch.no_grad()
 def upscale(
-    input_path,
-    output_path,
+    prompt,
+    negative_prompt,
+    output_dir,
+    num_images,
     batch_size,
     guidance_scale,
     noise_aug_level,
@@ -103,90 +112,96 @@ def upscale(
     autocast,
 ):
     SCALE_FACTOR = 0.18215
-    PROMPT = (
-        'the temple of fire by Ross Tran and Gerardo Dottori, oil on canvas'
-    )
     UPSCALER_DIR = os.path.join(os.path.dirname(__file__), 'latent_upscaler')
     UPSCALER_FILENAME = 'latent_upscaler.pth'
     UPSCALER_CONFIG = 'latent_upscaler.json'
     DEVICE = torch.device(get_available_device())
+    DEFAULT_NEGATIVE_PROMPT = (
+        'ugly,duplication,duplicates,mutilation,deformed,mutilated,mutation,'
+        'twisted body,disfigured,bad anatomy,out of frame,extra fingers,'
+        'mutated hands,poorly drawn hands,extra limbs,malformed limbs,missing arms,'
+        'extra arms,missing legs,extra legs,extra hands,fused fingers,missing fingers,'
+        'long neck,small head,closed eyes,rolling eyes,weird eyes,smudged face,'
+        'blurred face,poorly drawn face,cloned face,strange mouth,grainy,blurred,blurry,'
+        'writing,calligraphy,signature,text,watermark,bad art,nsfw,ugly,bad face,'
+        'flat color,flat shading,retro style,poor quality,bad fingers,low res,cropped,'
+        'username,artist name,low quality'
+    )
+    negative_prompt = negative_prompt or DEFAULT_NEGATIVE_PROMPT
 
-    download_model(UPSCALER_DIR, UPSCALER_FILENAME)
     seed_everything(int(time.time()))
+    sd_pipe = StableDiffusionPipeline.from_pretrained(
+        'runwayml/stable-diffusion-v1-5'
+    ).to(DEVICE)
+
+    # Generate images in a latent space
+    with amp_autocast(autocast, DEVICE):
+        images = sd_pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            height=512,
+            width=512,
+            num_images_per_prompt=num_images,
+            output_type='latent',
+        ).images.to(DEVICE)
 
     # Tokenize the prompts
-    tokenizer, text_encoder = CLIPTokenizerTransform(), CLIPEmbedder(
-        device=DEVICE
-    )
+    tokenizer, text_encoder = CLIPTokenizerTransform(
+        tokenizer=sd_pipe.tokenizer
+    ), CLIPEmbedder(encoder=sd_pipe.text_encoder, device=DEVICE)
     with amp_autocast(autocast, DEVICE):
-        encoded_c = text_encoder(tokenizer(batch_size * [PROMPT]))
-        encoded_uc = text_encoder(tokenizer(batch_size * ['']))
+        encoded_c = text_encoder(tokenizer(batch_size * [prompt]))
+        encoded_uc = text_encoder(tokenizer(batch_size * [negative_prompt]))
 
-    # Encode an image
-    vae = (
-        AutoencoderKL.from_pretrained(
-            'runwayml/stable-diffusion-v1-5', subfolder='vae'
-        )
-        .eval()
-        .requires_grad_(False)
-        .to(DEVICE)
-    )
-    # image = Image.open(input_path).convert('RGB')
-    # image = TF.to_tensor(image).to(DEVICE) * 2 - 1
-    prompt = "Mt. Fuji"
-
-    # パイプラインの作成
-    pipe = StableDiffusionPipeline.from_pretrained('runwayml/stable-diffusion-v1-5')
-    pipe = pipe.to(DEVICE)
-    image = pipe(prompt).images[0]
-    image = TF.to_tensor(image).to(DEVICE) * 2 - 1
-
-
-    low_res_latent = (
-        vae.encode(image.unsqueeze(0)).latent_dist.sample() * SCALE_FACTOR
-    )
-
-    # Sampling
-    if noise_aug_type == 'fake':
-        latent_noised = low_res_latent * (noise_aug_level**2 + 1) ** 0.5
-    else:
-        latent_noised = low_res_latent + noise_aug_level * torch.randn_like(
-            low_res_latent
-        )
-    extra_args = {
-        'low_res': latent_noised,
-        'low_res_sigma': torch.full(
-            [batch_size], noise_aug_level, device=DEVICE
-        ),
-        'c': encoded_c,
-    }
-    with amp_autocast(autocast, DEVICE):
-        upscaler = CFGUpscaler(
-            make_upscaler_model(
-                os.path.join(UPSCALER_DIR, UPSCALER_CONFIG),
-                os.path.join(UPSCALER_DIR, UPSCALER_FILENAME),
-                DEVICE,
-            ),
-            encoded_uc,
-            cond_scale=guidance_scale,
-        )
-        [_, C, H, W] = low_res_latent.shape
-        x_shape = [batch_size, C, 2 * H, 2 * W]
-        noise = torch.randn(x_shape, device=DEVICE)
-        up_latent = do_sample(
-            upscaler,
-            noise,
-            sampler,
-            sampler_steps,
-            sampler_eta,
-            sampler_tol_scale,
-            extra_args,
+    # Create upscaler
+    download_model(UPSCALER_DIR, UPSCALER_FILENAME)
+    upscaler = CFGUpscaler(
+        make_upscaler_model(
+            os.path.join(UPSCALER_DIR, UPSCALER_CONFIG),
+            os.path.join(UPSCALER_DIR, UPSCALER_FILENAME),
             DEVICE,
-        )
+        ),
+        encoded_uc,
+        cond_scale=guidance_scale,
+    )
 
-    # Save an upscaled image
-    pixels = vae.decode(up_latent / SCALE_FACTOR).sample
-    pixels = pixels.add(1).div(2).clamp(0, 1)
-    for i in range(pixels.shape[0]):
-        img = TF.to_pil_image(pixels[i])
-        img.save(output_path)
+    for image in images:
+        # Sampling process
+        low_res_latent = image.unsqueeze(0)
+        if noise_aug_type == 'fake':
+            latent_noised = low_res_latent * (noise_aug_level**2 + 1) ** 0.5
+        else:
+            latent_noised = (
+                low_res_latent
+                + noise_aug_level * torch.randn_like(low_res_latent)
+            )
+        extra_args = {
+            'low_res': latent_noised,
+            'low_res_sigma': torch.full(
+                [batch_size], noise_aug_level, device=DEVICE
+            ),
+            'c': encoded_c,
+        }
+        with amp_autocast(autocast, DEVICE):
+            [_, C, H, W] = low_res_latent.shape
+            x_shape = [batch_size, C, 2 * H, 2 * W]
+            noise = torch.randn(x_shape, device=DEVICE)
+            up_latent = do_sample(
+                upscaler,
+                noise,
+                sampler,
+                sampler_steps,
+                sampler_eta,
+                sampler_tol_scale,
+                extra_args,
+                DEVICE,
+            )
+
+        # Save an upscaled image
+        vae = sd_pipe.vae
+        pixels = vae.decode(up_latent / SCALE_FACTOR).sample
+        pixels = pixels.add(1).div(2).clamp(0, 1)
+        for i in range(pixels.shape[0]):
+            img = TF.to_pil_image(pixels[i])
+            file_path = os.path.join(output_dir, str(uuid.uuid4()) + '.jpeg')
+            img.save(file_path)
