@@ -4,6 +4,9 @@ version = "1.0.0"
 description = "Task2 for the Stability.ai interview"
 authors = ["Yuta Imamura <yuimam@amazon.co.jp>"]
 readme = "README.md"
+packages = [
+    { include = "src" },
+]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
