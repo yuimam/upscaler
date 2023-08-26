@@ -1,6 +1,8 @@
 import click
+import torch
 
 from image_controller import ImageController
+from utils import amp_autocast, get_available_device
 
 
 @click.group()
@@ -58,6 +60,7 @@ def _build_kwargs(required, optional):
     default=True,
     type=bool,
 )
+@torch.no_grad()
 def generate(
     prompt,
     negative_prompt,
@@ -68,46 +71,46 @@ def generate(
     eta,
     autocast,
 ):
-    click.echo('--- Launch Stable Diffusion ---')
-    image_controller = ImageController(use_autocast=autocast)
+    device = get_available_device()
+    with amp_autocast(autocast, device):
+        click.echo('--- Launch Stable Diffusion ---')
+        image_controller = ImageController(device)
 
-    click.echo('--- Generate images in a latent space ---')
-    kwargs = _build_kwargs(
-        {
-            'prompt': prompt,
-            'num_images': num_images,
-            'num_inference_steps': num_inference_steps,
-            'guidance_scale': guidance_scale,
-            'eta': eta,
-        },
-        {
-            'negative_prompt': negative_prompt,
-        },
-    )
-    latent_list = image_controller.generate_latents(**kwargs)
+        click.echo('--- Generate images in a latent space ---')
+        kwargs = _build_kwargs(
+            {
+                'prompt': prompt,
+                'num_images': num_images,
+                'num_inference_steps': num_inference_steps,
+                'guidance_scale': guidance_scale,
+                'eta': eta,
+            },
+            {
+                'negative_prompt': negative_prompt,
+            },
+        )
+        latent_list = image_controller.generate_latents(**kwargs)
 
-    click.echo('--- Sample latents ---')
-    kwargs = _build_kwargs(
-        {
-            'latents': latent_list,
-            'prompt': prompt,
-        },
-        {
-            'negative_prompt': negative_prompt,
-        },
-    )
-    up_latent_list = image_controller.upscale_latents(**kwargs)
+        click.echo('--- Sample latents ---')
+        kwargs = _build_kwargs(
+            {
+                'latents': latent_list,
+                'prompt': prompt,
+            },
+            {
+                'negative_prompt': negative_prompt,
+            },
+        )
+        up_latent_list = image_controller.upscale_latents(**kwargs)
 
-    # click.echo('--- Save Images ---')
-    # for up_latent in up_latent_list:
-    #     kwargs = _build_kwargs(
-    #         {
-    #             'latent': up_latent,
-    #         },
-    #         {
-    #             'output_dir': output_dir,
-    #         },
-    #     )
-    #     image_controller.save_image_from_latent(**kwargs)
-
-    click.echo('--- Finished ---')
+        click.echo('--- Save images ---')
+        for up_latent in up_latent_list:
+            kwargs = _build_kwargs(
+                {
+                    'latent': up_latent,
+                },
+                {
+                    'output_dir': output_dir,
+                },
+            )
+            image_controller.save_image_from_latent(**kwargs)

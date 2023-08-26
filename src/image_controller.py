@@ -10,9 +10,9 @@ from torchvision.transforms import functional as TF
 
 from models.clip import CLIPEmbedder, CLIPTokenizerTransform
 from models.upscaler import CFGUpscaler
-from utils import (amp_autocast, do_sample, download_model,
-                   get_available_device, make_upscaler_model)
 from src import ROOT_DIR
+from utils import do_sample, download_model, make_upscaler_model
+
 
 class ImageController:
     DEFAULT_NEGATIVE_PROMPT = (
@@ -32,9 +32,8 @@ class ImageController:
     SCALE_FACTOR = 0.18215
     OUTPUT_DIR = os.path.join(ROOT_DIR, 'output')
 
-    def __init__(self, use_autocast=True):
-        self.device = torch.device(get_available_device())
-        self.use_autocast = use_autocast
+    def __init__(self, device):
+        self.device = device
         self.sd_pipe = StableDiffusionPipeline.from_pretrained(
             'runwayml/stable-diffusion-v1-5'
         ).to(self.device)
@@ -49,18 +48,17 @@ class ImageController:
         guidance_scale=7.5,
         eta=0.0,
     ):
-        with amp_autocast(self.use_autocast, self.device):
-            latents = self.sd_pipe(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                height=512,
-                width=512,
-                num_images_per_prompt=num_images,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                eta=eta,
-                output_type='latent',
-            ).images.to(self.device)
+        latents = self.sd_pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            height=512,
+            width=512,
+            num_images_per_prompt=num_images,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            eta=eta,
+            output_type='latent',
+        ).images.to(self.device)
         return latents
 
     def upscale_latents(
@@ -79,9 +77,8 @@ class ImageController:
         tokenizer, text_encoder = CLIPTokenizerTransform(
             tokenizer=self.sd_pipe.tokenizer
         ), CLIPEmbedder(encoder=self.sd_pipe.text_encoder, device=self.device)
-        with amp_autocast(self.use_autocast, self.device):
-            encoded_c = text_encoder(tokenizer([prompt]))
-            encoded_uc = text_encoder(tokenizer([negative_prompt]))
+        encoded_c = text_encoder(tokenizer([prompt]))
+        encoded_uc = text_encoder(tokenizer([negative_prompt]))
 
         download_model(self.UPSCALER_DIR, self.UPSCALER_FILENAME)
         upscaler = CFGUpscaler(
@@ -113,35 +110,30 @@ class ImageController:
                 ),
                 'c': encoded_c,
             }
-            with amp_autocast(self.use_autocast, self.device):
-                [_, C, H, W] = low_res_latent.shape
-                x_shape = [1, C, 2 * H, 2 * W]
-                noise = torch.randn(x_shape, device=self.device)
-                up_latent = do_sample(
-                    upscaler,
-                    noise,
-                    sampler,
-                    steps,
-                    eta,
-                    tol_scale,
-                    extra_args,
-                    self.device,
-                )
-                up_latent_list.append(up_latent)
-
-            pixels = self.sd_pipe.vae.decode(up_latent / self.SCALE_FACTOR).sample
-            pixels = pixels.add(1).div(2).clamp(0, 1)
-            for i in range(pixels.shape[0]):
-                image = TF.to_pil_image(pixels[i])
-                file_path = os.path.join(self.OUTPUT_DIR, str(uuid.uuid4()) + '.png')
-                image.save(file_path)
+            [_, C, H, W] = low_res_latent.shape
+            x_shape = [1, C, 2 * H, 2 * W]
+            noise = torch.randn(x_shape, device=self.device)
+            up_latent = do_sample(
+                upscaler,
+                noise,
+                sampler,
+                steps,
+                eta,
+                tol_scale,
+                extra_args,
+                self.device,
+            )
+            up_latent_list.append(up_latent)
 
         return up_latent_list
 
     def save_image_from_latent(self, latent, output_dir=OUTPUT_DIR):
         pixels = self.sd_pipe.vae.decode(latent / self.SCALE_FACTOR).sample
         pixels = pixels.add(1).div(2).clamp(0, 1)
+        file_path = os.path.abspath(
+            os.path.join(output_dir, str(uuid.uuid4()) + '.png')
+        )
         for i in range(pixels.shape[0]):
             image = TF.to_pil_image(pixels[i])
-            file_path = os.path.join(output_dir, str(uuid.uuid4()) + '.png')
             image.save(file_path)
+        click.echo(f'Saved: {file_path}')
