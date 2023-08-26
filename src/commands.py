@@ -3,7 +3,7 @@ import time
 
 import click
 import torch
-from diffusers import AutoencoderKL
+from diffusers import AutoencoderKL, StableDiffusionPipeline
 from PIL import Image
 from pytorch_lightning import seed_everything
 from torchvision.transforms import functional as TF
@@ -131,8 +131,17 @@ def upscale(
         .requires_grad_(False)
         .to(DEVICE)
     )
-    image = Image.open(input_path).convert('RGB')
+    # image = Image.open(input_path).convert('RGB')
+    # image = TF.to_tensor(image).to(DEVICE) * 2 - 1
+    prompt = "Mt. Fuji"
+
+    # パイプラインの作成
+    pipe = StableDiffusionPipeline.from_pretrained('runwayml/stable-diffusion-v1-5')
+    pipe = pipe.to(DEVICE)
+    image = pipe(prompt).images[0]
     image = TF.to_tensor(image).to(DEVICE) * 2 - 1
+
+
     low_res_latent = (
         vae.encode(image.unsqueeze(0)).latent_dist.sample() * SCALE_FACTOR
     )
